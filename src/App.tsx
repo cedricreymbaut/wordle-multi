@@ -191,7 +191,7 @@ function App() {
   useEffect(() => {
     const channel = supabase.channel('game-events', {
       config: {
-        broadcast: { self: false },
+        broadcast: { self: true, ack: true },
         presence:  { key: getPresenceKey() },
       },
     });
@@ -256,6 +256,39 @@ function App() {
     }
   }, [playerName]);
 
+  /* ── Polling de secours : détecter si la partie a été gagnée ── */
+  useEffect(() => {
+    if (!game || gameOver || winData) return;
+    const interval = setInterval(async () => {
+      const { data } = await supabase
+        .from('games')
+        .select('status, winner_name, winner_guesses')
+        .eq('id', game.id)
+        .single();
+      if (data && data.status === 'completed' && data.winner_name) {
+        // Quelqu'un a gagné — charger la nouvelle partie
+        const { data: newGame } = await supabase
+          .from('games')
+          .select('*')
+          .eq('status', 'active')
+          .order('started_at', { ascending: false })
+          .limit(1)
+          .single();
+        if (newGame && data.winner_name !== playerNameRef.current) {
+          fetchScores();
+          startCountdown(
+            newGame,
+            data.winner_name,
+            data.winner_guesses ?? 0,
+            game.word,
+            false,
+          );
+        }
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [game, gameOver, winData, fetchScores, startCountdown]);
+
   /* ── Victoire ── */
   const handleWin = useCallback(async (guessCount: number) => {
     if (!game || !playerNameRef.current) return;
@@ -274,7 +307,7 @@ function App() {
         word: game.word,
         new_game: data.new_game,
       };
-      channelRef.current?.send({ type: 'broadcast', event: 'game_won', payload });
+      await channelRef.current?.send({ type: 'broadcast', event: 'game_won', payload });
       fetchScores();
       startCountdown(data.new_game, playerNameRef.current, guessCount, game.word, true);
     }
