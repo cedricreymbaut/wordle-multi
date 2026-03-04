@@ -12,6 +12,14 @@ import type { TileData, Game } from './types';
 
 const COUNTDOWN_SECONDS = 6;
 
+// Payload du broadcast envoyé quand quelqu'un gagne
+interface WonPayload {
+  winner_name: string;
+  winner_guesses: number;
+  word: string;
+  new_game: Game;
+}
+
 function App() {
   const [playerName, setPlayerName] = useState<string>(() =>
     localStorage.getItem('wordle_name') || ''
@@ -26,17 +34,21 @@ function App() {
   const [toast, setToast] = useState('');
   const [winData, setWinData] = useState<{ name: string; guesses: number; word: string; isMe: boolean } | null>(null);
   const [countdown, setCountdown] = useState(COUNTDOWN_SECONDS);
+
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastRef    = useRef<ReturnType<typeof setTimeout>  | null>(null);
+  const channelRef  = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const playerNameRef = useRef(playerName);
   useEffect(() => { playerNameRef.current = playerName; }, [playerName]);
 
+  /* ── Toast ── */
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastRef.current) clearTimeout(toastRef.current);
     toastRef.current = setTimeout(() => setToast(''), 2500);
   }, []);
 
+  /* ── Reset local state ── */
   const resetLocalGame = useCallback(() => {
     setGuesses([]);
     setCurrentGuess('');
@@ -47,7 +59,14 @@ function App() {
     if (countdownRef.current) clearInterval(countdownRef.current);
   }, []);
 
-  const startCountdown = useCallback((newGame: Game, winnerName: string, winnerGuesses: number, word: string, isMe: boolean) => {
+  /* ── Countdown avant nouveau mot ── */
+  const startCountdown = useCallback((
+    newGame: Game,
+    winnerName: string,
+    winnerGuesses: number,
+    word: string,
+    isMe: boolean,
+  ) => {
     setWinData({ name: winnerName, guesses: winnerGuesses, word, isMe });
     setCountdown(COUNTDOWN_SECONDS);
 
@@ -58,14 +77,14 @@ function App() {
       remaining -= 1;
       setCountdown(remaining);
       if (remaining <= 0) {
-        if (countdownRef.current) clearInterval(countdownRef.current);
+        clearInterval(countdownRef.current!);
         setGame(newGame);
         resetLocalGame();
       }
     }, 1000);
   }, [resetLocalGame]);
 
-  // Charge ou crée la partie active
+  /* ── Chargement de la partie active au démarrage ── */
   useEffect(() => {
     async function loadGame() {
       const { data, error } = await supabase
@@ -86,8 +105,7 @@ function App() {
           .single();
 
         if (insertError) {
-          // Un autre client a créé une partie en même temps (race condition)
-          // → on récupère celle qui existe déjà
+          // Race condition : un autre client a déjà créé une partie
           const { data: existing } = await supabase
             .from('games')
             .select('*')
@@ -103,49 +121,37 @@ function App() {
         setGame(data);
       }
     }
+
     loadGame();
   }, []);
 
-  // Abonnement temps réel
+  /* ── Abonnement Realtime via Broadcast ── */
   useEffect(() => {
-    const channel = supabase
-      .channel('game-updates')
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'games' },
-        async (payload) => {
-          const updated = payload.new as Game;
-          if (updated.status === 'completed' && updated.winner_name) {
-            const isMe = updated.winner_name === playerNameRef.current;
-            if (isMe) return; // Déjà géré par handleWin
+    // On utilise Supabase Broadcast — plus fiable que postgres_changes pour
+    // les notifications temps réel entre clients.
+    const channel = supabase.channel('game-events', {
+      config: { broadcast: { self: false } }, // ne pas recevoir ses propres messages
+    });
 
-            const word = updated.word;
-            const winnerGuesses = updated.winner_guesses || 0;
-
-            // Petit délai pour s'assurer que la nouvelle partie est insérée
-            setTimeout(async () => {
-              const { data: nextGame } = await supabase
-                .from('games')
-                .select('*')
-                .eq('status', 'active')
-                .order('started_at', { ascending: false })
-                .limit(1)
-                .single();
-
-              if (nextGame) {
-                startCountdown(nextGame, updated.winner_name!, winnerGuesses, word, false);
-              }
-            }, 400);
-          }
+    channel
+      .on('broadcast', { event: 'game_won' }, ({ payload }: { payload: WonPayload }) => {
+        // Ignoré si c'est nous qui avons gagné (déjà géré dans handleWin)
+        if (payload.winner_name === playerNameRef.current) return;
+        startCountdown(payload.new_game, payload.winner_name, payload.winner_guesses, payload.word, false);
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channelRef.current = channel;
         }
-      )
-      .subscribe();
+      });
 
     return () => {
       supabase.removeChannel(channel);
+      channelRef.current = null;
     };
   }, [startCountdown]);
 
+  /* ── Victoire ── */
   const handleWin = useCallback(async (guessCount: number) => {
     if (!game || !playerNameRef.current) return;
     setGameOver(true);
@@ -159,18 +165,34 @@ function App() {
     });
 
     if (data?.success) {
+      const payload: WonPayload = {
+        winner_name: playerNameRef.current,
+        winner_guesses: guessCount,
+        word: game.word,
+        new_game: data.new_game,
+      };
+
+      // Broadcast aux autres joueurs
+      channelRef.current?.send({
+        type: 'broadcast',
+        event: 'game_won',
+        payload,
+      });
+
       startCountdown(data.new_game, playerNameRef.current, guessCount, game.word, true);
     }
-    // Si data.success = false → quelqu'un d'autre a gagné en même temps
-    // → le Realtime UPDATE va déclencher startCountdown pour nous
+    // Si success=false → quelqu'un d'autre a gagné en même temps
+    // → leur broadcast déclenchera startCountdown pour nous
   }, [game, startCountdown]);
 
+  /* ── Défaite ── */
   const handleLose = useCallback((word: string) => {
     setGameOver(true);
     setLost(true);
     showToast(`Le mot était : ${word}`);
   }, [showToast]);
 
+  /* ── Soumettre un essai ── */
   const submitGuess = useCallback(() => {
     if (!game || gameOver || currentGuess.length !== WORD_LENGTH || winData) return;
 
@@ -195,6 +217,7 @@ function App() {
     }
   }, [game, gameOver, currentGuess, guesses, winData, showToast, handleWin, handleLose]);
 
+  /* ── Gestion clavier ── */
   const handleKey = useCallback((key: string) => {
     if (gameOver || winData) return;
 
@@ -213,6 +236,7 @@ function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [handleKey]);
 
+  /* ── Modal pseudo ── */
   if (!playerName) {
     return (
       <NameModal onConfirm={(name) => {
