@@ -202,6 +202,11 @@ function App() {
       setConnectedPlayers([...new Set(names)]);
     };
 
+    const addPlayers  = (names: string[]) =>
+      setConnectedPlayers(prev => [...new Set([...prev, ...names.filter(Boolean)])]);
+    const dropPlayers = (names: string[]) =>
+      setConnectedPlayers(prev => prev.filter(n => !names.includes(n)));
+
     channel
       .on('broadcast', { event: 'game_won' }, ({ payload }: { payload: WonPayload }) => {
         if (payload.winner_name === playerNameRef.current) return;
@@ -209,7 +214,6 @@ function App() {
         startCountdown(payload.new_game, payload.winner_name, payload.winner_guesses, payload.word, false);
       })
       .on('broadcast', { event: 'guess_made' }, ({ payload }: { payload: GuessMadePayload }) => {
-        // Ignorer si c'est nous ou si c'est pour une autre partie
         if (payload.player_name === playerNameRef.current) return;
         if (payload.game_id !== gameRef.current?.id) return;
         setPlayerProgress(prev => ({
@@ -219,18 +223,18 @@ function App() {
       })
       .on('presence', { event: 'sync' }, syncPresence)
       .on('presence', { event: 'join' }, ({ newPresences }: { newPresences: Array<{ name: string }> }) => {
-        const names = newPresences.map(p => p.name).filter(Boolean);
-        if (names.length) setConnectedPlayers(prev => [...new Set([...prev, ...names])]);
+        addPlayers(newPresences.map(p => p.name));
       })
       .on('presence', { event: 'leave' }, ({ leftPresences }: { leftPresences: Array<{ name: string }> }) => {
-        const names = leftPresences.map(p => p.name).filter(Boolean);
-        if (names.length) setConnectedPlayers(prev => prev.filter(n => !names.includes(n)));
+        dropPlayers(leftPresences.map(p => p.name));
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           channelRef.current = channel;
           if (playerNameRef.current) {
-            await channel.track({ name: playerNameRef.current });
+            const result = await channel.track({ name: playerNameRef.current });
+            // Ajouter soi-même directement — sans attendre le join event
+            if (result === 'ok') addPlayers([playerNameRef.current]);
           }
         }
       });
@@ -244,7 +248,11 @@ function App() {
   /* ── Tracker la présence quand le pseudo est défini ── */
   useEffect(() => {
     if (playerName && channelRef.current) {
-      channelRef.current.track({ name: playerName });
+      channelRef.current.track({ name: playerName }).then(result => {
+        if (result === 'ok') {
+          setConnectedPlayers(prev => [...new Set([...prev, playerName])]);
+        }
+      });
     }
   }, [playerName]);
 
