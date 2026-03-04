@@ -218,8 +218,14 @@ function App() {
         }));
       })
       .on('presence', { event: 'sync' }, syncPresence)
-      .on('presence', { event: 'join' }, syncPresence)
-      .on('presence', { event: 'leave' }, syncPresence)
+      .on('presence', { event: 'join' }, ({ newPresences }: { newPresences: Array<{ name: string }> }) => {
+        const names = newPresences.map(p => p.name).filter(Boolean);
+        if (names.length) setConnectedPlayers(prev => [...new Set([...prev, ...names])]);
+      })
+      .on('presence', { event: 'leave' }, ({ leftPresences }: { leftPresences: Array<{ name: string }> }) => {
+        const names = leftPresences.map(p => p.name).filter(Boolean);
+        if (names.length) setConnectedPlayers(prev => prev.filter(n => !names.includes(n)));
+      })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           channelRef.current = channel;
