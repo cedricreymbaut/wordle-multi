@@ -21,6 +21,7 @@ function App() {
   const [currentGuess, setCurrentGuess] = useState('');
   const [currentRow, setCurrentRow] = useState(0);
   const [gameOver, setGameOver] = useState(false);
+  const [lost, setLost] = useState(false);
   const [shake, setShake] = useState(false);
   const [toast, setToast] = useState('');
   const [winData, setWinData] = useState<{ name: string; guesses: number; word: string; isMe: boolean } | null>(null);
@@ -33,7 +34,7 @@ function App() {
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastRef.current) clearTimeout(toastRef.current);
-    toastRef.current = setTimeout(() => setToast(''), 2000);
+    toastRef.current = setTimeout(() => setToast(''), 2500);
   }, []);
 
   const resetLocalGame = useCallback(() => {
@@ -41,6 +42,7 @@ function App() {
     setCurrentGuess('');
     setCurrentRow(0);
     setGameOver(false);
+    setLost(false);
     setWinData(null);
     if (countdownRef.current) clearInterval(countdownRef.current);
   }, []);
@@ -63,7 +65,7 @@ function App() {
     }, 1000);
   }, [resetLocalGame]);
 
-  // Load or create active game
+  // Charge ou crée la partie active
   useEffect(() => {
     async function loadGame() {
       const { data, error } = await supabase
@@ -75,13 +77,28 @@ function App() {
         .single();
 
       if (error || !data) {
+        // Aucune partie active — on en crée une
         const word = getRandomWord();
-        const { data: newGame } = await supabase
+        const { data: newGame, error: insertError } = await supabase
           .from('games')
           .insert({ word, status: 'active' })
           .select()
           .single();
-        if (newGame) setGame(newGame);
+
+        if (insertError) {
+          // Un autre client a créé une partie en même temps (race condition)
+          // → on récupère celle qui existe déjà
+          const { data: existing } = await supabase
+            .from('games')
+            .select('*')
+            .eq('status', 'active')
+            .order('started_at', { ascending: false })
+            .limit(1)
+            .single();
+          if (existing) setGame(existing);
+        } else if (newGame) {
+          setGame(newGame);
+        }
       } else {
         setGame(data);
       }
@@ -89,7 +106,7 @@ function App() {
     loadGame();
   }, []);
 
-  // Real-time subscription
+  // Abonnement temps réel
   useEffect(() => {
     const channel = supabase
       .channel('game-updates')
@@ -100,11 +117,12 @@ function App() {
           const updated = payload.new as Game;
           if (updated.status === 'completed' && updated.winner_name) {
             const isMe = updated.winner_name === playerNameRef.current;
-            if (isMe) return; // Already handled by handleWin
+            if (isMe) return; // Déjà géré par handleWin
 
             const word = updated.word;
             const winnerGuesses = updated.winner_guesses || 0;
 
+            // Petit délai pour s'assurer que la nouvelle partie est insérée
             setTimeout(async () => {
               const { data: nextGame } = await supabase
                 .from('games')
@@ -128,7 +146,7 @@ function App() {
     };
   }, [startCountdown]);
 
-  const handleWin = useCallback(async (_newGuesses: TileData[][], guessCount: number) => {
+  const handleWin = useCallback(async (guessCount: number) => {
     if (!game || !playerNameRef.current) return;
     setGameOver(true);
 
@@ -143,11 +161,13 @@ function App() {
     if (data?.success) {
       startCountdown(data.new_game, playerNameRef.current, guessCount, game.word, true);
     }
-    // If data.success is false, someone else won — realtime UPDATE will handle it
+    // Si data.success = false → quelqu'un d'autre a gagné en même temps
+    // → le Realtime UPDATE va déclencher startCountdown pour nous
   }, [game, startCountdown]);
 
   const handleLose = useCallback((word: string) => {
     setGameOver(true);
+    setLost(true);
     showToast(`Le mot était : ${word}`);
   }, [showToast]);
 
@@ -169,7 +189,7 @@ function App() {
 
     const won = result.every(t => t.state === 'correct');
     if (won) {
-      handleWin(newGuesses, newGuesses.length);
+      handleWin(newGuesses.length);
     } else if (newGuesses.length >= MAX_GUESSES) {
       handleLose(game.word);
     }
@@ -215,6 +235,9 @@ function App() {
           currentRow={currentRow}
           shake={shake}
         />
+        {lost && !winData && (
+          <p className="waiting-msg">⏳ En attente du prochain mot…</p>
+        )}
         <Keyboard onKey={handleKey} keyStates={keyStates} />
       </main>
       {winData && (
