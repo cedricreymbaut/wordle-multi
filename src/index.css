@@ -508,14 +508,20 @@ body {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
 }
 
 .player-item {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.875rem;
+}
+
+.player-item__header {
+  display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.875rem;
 }
 
 .player-item__dot {
@@ -545,6 +551,21 @@ body {
   padding: 1px 6px;
   border-radius: 99px;
   flex-shrink: 0;
+}
+
+/* Progression des joueurs (emojis) */
+.player-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 15px;
+}
+
+.player-progress-row {
+  display: flex;
+  gap: 2px;
+  font-size: 0.75rem;
+  line-height: 1;
 }
 
 /* Classement */

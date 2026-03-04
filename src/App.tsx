@@ -21,6 +21,12 @@ interface WonPayload {
   new_game: Game;
 }
 
+interface GuessMadePayload {
+  player_name: string;
+  game_id: string;
+  tiles: string[]; // TileState[]
+}
+
 function getPresenceKey(): string {
   let key = sessionStorage.getItem('wordle_pkey');
   if (!key) {
@@ -28,6 +34,27 @@ function getPresenceKey(): string {
     sessionStorage.setItem('wordle_pkey', key);
   }
   return key;
+}
+
+// ── Sauvegarde locale ──────────────────────────────────────────────────────
+interface SavedState {
+  gameId: string;
+  guesses: TileData[][];
+  currentRow: number;
+  gameOver: boolean;
+  lost: boolean;
+}
+const SAVE_KEY = 'wordle_save';
+function loadSavedState(gameId: string): SavedState | null {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const s: SavedState = JSON.parse(raw);
+    return s.gameId === gameId ? s : null;
+  } catch { return null; }
+}
+function saveState(s: SavedState) {
+  localStorage.setItem(SAVE_KEY, JSON.stringify(s));
 }
 
 function App() {
@@ -47,19 +74,25 @@ function App() {
   const [connectedPlayers, setConnectedPlayers] = useState<string[]>([]);
   const [scores, setScores]               = useState<Score[]>([]);
   const [sidebarOpen, setSidebarOpen]     = useState(false);
+  // progression des autres joueurs : { [pseudo]: [TileState[], ...] }
+  const [playerProgress, setPlayerProgress] = useState<Record<string, string[][]>>({});
 
   const countdownRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const toastRef      = useRef<ReturnType<typeof setTimeout>  | null>(null);
   const channelRef    = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const playerNameRef = useRef(playerName);
+  const gameRef       = useRef<Game | null>(null);
   useEffect(() => { playerNameRef.current = playerName; }, [playerName]);
+  useEffect(() => { gameRef.current = game; }, [game]);
 
+  /* ── Toast ── */
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastRef.current) clearTimeout(toastRef.current);
     toastRef.current = setTimeout(() => setToast(''), 2500);
   }, []);
 
+  /* ── Reset local state ── */
   const resetLocalGame = useCallback(() => {
     setGuesses([]);
     setCurrentGuess('');
@@ -67,16 +100,15 @@ function App() {
     setGameOver(false);
     setLost(false);
     setWinData(null);
+    setPlayerProgress({});
     if (countdownRef.current) clearInterval(countdownRef.current);
   }, []);
 
+  /* ── Fetch scores ── */
   const fetchScores = useCallback(async () => {
     const { data } = await supabase
-      .from('games')
-      .select('winner_name')
-      .eq('status', 'completed')
-      .not('winner_name', 'is', null);
-
+      .from('games').select('winner_name')
+      .eq('status', 'completed').not('winner_name', 'is', null);
     if (!data) return;
     const counts: Record<string, number> = {};
     for (const g of data) {
@@ -90,12 +122,9 @@ function App() {
     );
   }, []);
 
+  /* ── Countdown ── */
   const startCountdown = useCallback((
-    newGame: Game,
-    winnerName: string,
-    winnerGuesses: number,
-    word: string,
-    isMe: boolean,
+    newGame: Game, winnerName: string, winnerGuesses: number, word: string, isMe: boolean,
   ) => {
     setWinData({ name: winnerName, guesses: winnerGuesses, word, isMe });
     setCountdown(COUNTDOWN_SECONDS);
@@ -112,11 +141,13 @@ function App() {
     }, 1000);
   }, [resetLocalGame]);
 
+  /* ── Chargement de la partie active ── */
   useEffect(() => {
     async function loadGame() {
       const { data, error } = await supabase
         .from('games').select('*').eq('status', 'active')
         .order('started_at', { ascending: false }).limit(1).single();
+
       if (error || !data) {
         const word = getRandomWord();
         const { data: newGame, error: insertError } = await supabase
@@ -137,6 +168,26 @@ function App() {
     fetchScores();
   }, [fetchScores]);
 
+  /* ── Restaurer les guesses depuis localStorage quand le game change ── */
+  useEffect(() => {
+    if (!game) return;
+    const saved = loadSavedState(game.id);
+    if (saved && saved.guesses.length > 0) {
+      setGuesses(saved.guesses);
+      setCurrentRow(saved.currentRow);
+      setGameOver(saved.gameOver);
+      setLost(saved.lost);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game?.id]);
+
+  /* ── Sauvegarder l'état après chaque guess ── */
+  useEffect(() => {
+    if (!game || guesses.length === 0) return;
+    saveState({ gameId: game.id, guesses, currentRow, gameOver, lost });
+  }, [game, guesses, currentRow, gameOver, lost]);
+
+  /* ── Realtime : Broadcast + Presence ── */
   useEffect(() => {
     const channel = supabase.channel('game-events', {
       config: {
@@ -157,6 +208,15 @@ function App() {
         fetchScores();
         startCountdown(payload.new_game, payload.winner_name, payload.winner_guesses, payload.word, false);
       })
+      .on('broadcast', { event: 'guess_made' }, ({ payload }: { payload: GuessMadePayload }) => {
+        // Ignorer si c'est nous ou si c'est pour une autre partie
+        if (payload.player_name === playerNameRef.current) return;
+        if (payload.game_id !== gameRef.current?.id) return;
+        setPlayerProgress(prev => ({
+          ...prev,
+          [payload.player_name]: [...(prev[payload.player_name] || []), payload.tiles],
+        }));
+      })
       .on('presence', { event: 'sync' }, syncPresence)
       .on('presence', { event: 'join' }, syncPresence)
       .on('presence', { event: 'leave' }, syncPresence)
@@ -175,12 +235,14 @@ function App() {
     };
   }, [startCountdown, fetchScores]);
 
+  /* ── Tracker la présence quand le pseudo est défini ── */
   useEffect(() => {
     if (playerName && channelRef.current) {
       channelRef.current.track({ name: playerName });
     }
   }, [playerName]);
 
+  /* ── Victoire ── */
   const handleWin = useCallback(async (guessCount: number) => {
     if (!game || !playerNameRef.current) return;
     setGameOver(true);
@@ -204,30 +266,47 @@ function App() {
     }
   }, [game, startCountdown, fetchScores]);
 
+  /* ── Défaite ── */
   const handleLose = useCallback((word: string) => {
     setGameOver(true);
     setLost(true);
     showToast(`Le mot était : ${word}`);
   }, [showToast]);
 
+  /* ── Soumettre un essai ── */
   const submitGuess = useCallback(() => {
     if (!game || gameOver || currentGuess.length !== WORD_LENGTH || winData) return;
+
     if (!isValidWord(currentGuess)) {
       showToast('Mot non reconnu');
       setShake(true);
       setTimeout(() => setShake(false), 500);
       return;
     }
+
     const result = evaluateGuess(currentGuess, game.word);
     const newGuesses = [...guesses, result];
     setGuesses(newGuesses);
     setCurrentGuess('');
     setCurrentRow(r => r + 1);
+
+    // Broadcast notre progression (couleurs seulement, pas les lettres)
+    channelRef.current?.send({
+      type: 'broadcast',
+      event: 'guess_made',
+      payload: {
+        player_name: playerNameRef.current,
+        game_id: game.id,
+        tiles: result.map(t => t.state),
+      } satisfies GuessMadePayload,
+    });
+
     const won = result.every(t => t.state === 'correct');
     if (won) handleWin(newGuesses.length);
     else if (newGuesses.length >= MAX_GUESSES) handleLose(game.word);
   }, [game, gameOver, currentGuess, guesses, winData, showToast, handleWin, handleLose]);
 
+  /* ── Clavier ── */
   const handleKey = useCallback((key: string) => {
     if (gameOver || winData) return;
     if (key === '⌫' || key === 'Backspace') setCurrentGuess(g => g.slice(0, -1));
@@ -252,6 +331,8 @@ function App() {
   }
 
   const keyStates = buildKeyboardStates(guesses);
+  // Progression du joueur courant sous forme de TileState[][]
+  const myProgress = guesses.map(row => row.map(t => t.state));
 
   return (
     <div className="page">
@@ -274,6 +355,8 @@ function App() {
           connectedPlayers={connectedPlayers}
           scores={scores}
           currentPlayer={playerName}
+          myProgress={myProgress}
+          playerProgress={playerProgress}
           isOpen={sidebarOpen}
           onToggle={() => setSidebarOpen(o => !o)}
         />

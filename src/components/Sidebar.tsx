@@ -7,13 +7,44 @@ interface SidebarProps {
   connectedPlayers: string[];
   scores: Score[];
   currentPlayer: string;
+  myProgress: string[][];
+  playerProgress: Record<string, string[][]>;
   isOpen: boolean;
   onToggle: () => void;
 }
 
 const MEDALS = ['🥇', '🥈', '🥉'];
 
-export function Sidebar({ connectedPlayers, scores, currentPlayer, isOpen, onToggle }: SidebarProps) {
+const STATE_EMOJI: Record<string, string> = {
+  correct: '🟢',
+  present: '🟡',
+  absent:  '🔴',
+};
+
+function ProgressRows({ rows }: { rows: string[][] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="player-progress">
+      {rows.map((row, i) => (
+        <div key={i} className="player-progress-row">
+          {row.map((state, j) => (
+            <span key={j}>{STATE_EMOJI[state] ?? '⬜'}</span>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function Sidebar({
+  connectedPlayers,
+  scores,
+  currentPlayer,
+  myProgress,
+  playerProgress,
+  isOpen,
+  onToggle,
+}: SidebarProps) {
   return (
     <>
       {/* Bouton toggle (mobile) */}
@@ -45,18 +76,23 @@ export function Sidebar({ connectedPlayers, scores, currentPlayer, isOpen, onTog
             <p className="sidebar-empty">Aucun joueur connecté</p>
           ) : (
             <ul className="player-list">
-              {connectedPlayers.map((name) => (
-                <li
-                  key={name}
-                  className={`player-item${name === currentPlayer ? ' player-item--me' : ''}`}
-                >
-                  <span className="player-item__dot" />
-                  <span className="player-item__name">{name}</span>
-                  {name === currentPlayer && (
-                    <span className="player-item__tag">toi</span>
-                  )}
-                </li>
-              ))}
+              {connectedPlayers.map((name) => {
+                const isMe = name === currentPlayer;
+                const rows = isMe ? myProgress : (playerProgress[name] ?? []);
+                return (
+                  <li
+                    key={name}
+                    className={`player-item${isMe ? ' player-item--me' : ''}`}
+                  >
+                    <div className="player-item__header">
+                      <span className="player-item__dot" />
+                      <span className="player-item__name">{name}</span>
+                      {isMe && <span className="player-item__tag">toi</span>}
+                    </div>
+                    <ProgressRows rows={rows} />
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
