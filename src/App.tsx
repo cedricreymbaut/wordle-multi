@@ -27,15 +27,6 @@ interface GuessMadePayload {
   tiles: string[]; // TileState[]
 }
 
-function getPresenceKey(): string {
-  let key = sessionStorage.getItem('wordle_pkey');
-  if (!key) {
-    key = Math.random().toString(36).substring(2, 10);
-    sessionStorage.setItem('wordle_pkey', key);
-  }
-  return key;
-}
-
 // ── Sauvegarde locale ──────────────────────────────────────────────────────
 interface SavedState {
   gameId: string;
@@ -187,25 +178,9 @@ function App() {
     saveState({ gameId: game.id, guesses, currentRow, gameOver, lost });
   }, [game, guesses, currentRow, gameOver, lost]);
 
-  /* ── Realtime : Broadcast + Presence ── */
+  /* ── Broadcast channel (best-effort pour guess_made) ── */
   useEffect(() => {
-    const channel = supabase.channel('game-events', {
-      config: {
-        broadcast: { self: true, ack: true },
-        presence:  { key: getPresenceKey() },
-      },
-    });
-
-    const syncPresence = () => {
-      const state = channel.presenceState<{ name: string }>();
-      const names = Object.values(state).flat().map((p) => p.name).filter(Boolean);
-      setConnectedPlayers([...new Set(names)]);
-    };
-
-    const addPlayers  = (names: string[]) =>
-      setConnectedPlayers(prev => [...new Set([...prev, ...names.filter(Boolean)])]);
-    const dropPlayers = (names: string[]) =>
-      setConnectedPlayers(prev => prev.filter(n => !names.includes(n)));
+    const channel = supabase.channel('game-events');
 
     channel
       .on('broadcast', { event: 'game_won' }, ({ payload }: { payload: WonPayload }) => {
@@ -221,22 +196,8 @@ function App() {
           [payload.player_name]: [...(prev[payload.player_name] || []), payload.tiles],
         }));
       })
-      .on('presence', { event: 'sync' }, syncPresence)
-      .on('presence', { event: 'join' }, ({ newPresences }: { newPresences: Array<{ name: string }> }) => {
-        addPlayers(newPresences.map(p => p.name));
-      })
-      .on('presence', { event: 'leave' }, ({ leftPresences }: { leftPresences: Array<{ name: string }> }) => {
-        dropPlayers(leftPresences.map(p => p.name));
-      })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          channelRef.current = channel;
-          if (playerNameRef.current) {
-            const result = await channel.track({ name: playerNameRef.current });
-            // Ajouter soi-même directement — sans attendre le join event
-            if (result === 'ok') addPlayers([playerNameRef.current]);
-          }
-        }
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') channelRef.current = channel;
       });
 
     return () => {
@@ -245,15 +206,42 @@ function App() {
     };
   }, [startCountdown, fetchScores]);
 
-  /* ── Tracker la présence quand le pseudo est défini ── */
+  /* ── Présence DB : heartbeat toutes les 5s ── */
   useEffect(() => {
-    if (playerName && channelRef.current) {
-      channelRef.current.track({ name: playerName }).then(result => {
-        if (result === 'ok') {
-          setConnectedPlayers(prev => [...new Set([...prev, playerName])]);
-        }
-      });
-    }
+    if (!playerName) return;
+
+    const heartbeat = () =>
+      supabase
+        .from('online_players')
+        .upsert({ name: playerName, last_seen: new Date().toISOString() }, { onConflict: 'name' })
+        .then();
+
+    heartbeat();                                    // signal immédiat
+    const interval = setInterval(heartbeat, 5000);  // puis toutes les 5s
+
+    return () => {
+      clearInterval(interval);
+      // best-effort : supprimer la ligne quand le composant se démonte
+      supabase.from('online_players').delete().eq('name', playerName).then();
+    };
+  }, [playerName]);
+
+  /* ── Présence DB : polling des joueurs en ligne ── */
+  useEffect(() => {
+    if (!playerName) return;
+
+    const poll = async () => {
+      const cutoff = new Date(Date.now() - 15_000).toISOString();
+      const { data } = await supabase
+        .from('online_players')
+        .select('name')
+        .gte('last_seen', cutoff);
+      if (data) setConnectedPlayers(data.map(p => p.name));
+    };
+
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
   }, [playerName]);
 
   /* ── Polling : détecter si la partie a été gagnée par quelqu'un ──
