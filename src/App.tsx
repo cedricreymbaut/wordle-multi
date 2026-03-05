@@ -52,6 +52,7 @@ function App() {
   const [currentRow, setCurrentRow]       = useState(0);
   const [gameOver, setGameOver]           = useState(false);
   const [lost, setLost]                   = useState(false);
+  const [lostWord, setLostWord]           = useState<string | null>(null);
   const [shake, setShake]                 = useState(false);
   const [toast, setToast]                 = useState('');
   const [winData, setWinData]             = useState<{ name: string; guesses: number; word: string; isMe: boolean } | null>(null);
@@ -86,6 +87,7 @@ function App() {
     setCurrentRow(0);
     setGameOver(false);
     setLost(false);
+    setLostWord(null);
     setWinData(null);
     setPlayerProgress({});
     if (countdownRef.current) clearInterval(countdownRef.current);
@@ -287,6 +289,74 @@ function App() {
     return () => clearInterval(interval);
   }, [game, winData, fetchScores, startCountdown]);
 
+  /* ── Auto-relance si tous les joueurs ont perdu ── */
+  useEffect(() => {
+    if (!lost || winData || !game) return;
+
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const checkAllLost = async () => {
+      try {
+        const cutoff = new Date(Date.now() - 15_000).toISOString();
+        const { data } = await supabase
+          .from('online_players')
+          .select('name, progress')
+          .gte('last_seen', cutoff);
+        if (!data) return;
+
+        // Un joueur est "encore en jeu" s'il a entre 1 et MAX_GUESSES-1 essais
+        const someoneStillPlaying = data.some(p => {
+          if (p.name === playerName) return false;
+          const prog = Array.isArray(p.progress) ? p.progress : [];
+          return prog.length > 0 && prog.length < MAX_GUESSES;
+        });
+
+        if (!someoneStillPlaying) {
+          if (interval) clearInterval(interval);
+
+          // Compléter la partie sans vainqueur
+          await supabase
+            .from('games')
+            .update({ status: 'completed', ended_at: new Date().toISOString() })
+            .eq('id', game.id)
+            .eq('status', 'active');
+
+          // Créer une nouvelle partie (l'index unique empêche les doublons)
+          const newWord = getRandomWord();
+          const { data: newGame, error: insertError } = await supabase
+            .from('games')
+            .insert({ word: newWord, status: 'active' })
+            .select()
+            .single();
+
+          let nextGame = newGame;
+          if (insertError) {
+            const { data: existing } = await supabase
+              .from('games').select('*').eq('status', 'active')
+              .order('started_at', { ascending: false }).limit(1).single();
+            nextGame = existing;
+          }
+          if (nextGame) {
+            startCountdown(nextGame, '', 0, game.word, false);
+          }
+        }
+      } catch (err) {
+        console.error('[allLost] polling error:', err);
+      }
+    };
+
+    // Attendre 5s après la défaite, puis vérifier toutes les 4s
+    const timeout = setTimeout(() => {
+      checkAllLost();
+      interval = setInterval(checkAllLost, 4000);
+    }, 5000);
+
+    return () => {
+      clearTimeout(timeout);
+      if (interval) clearInterval(interval);
+    };
+  }, [lost, winData, game, playerName, startCountdown]);
+
   /* ── Victoire ── */
   const handleWin = useCallback(async (guessCount: number) => {
     if (!game || !playerNameRef.current) return;
@@ -332,8 +402,8 @@ function App() {
   const handleLose = useCallback((word: string) => {
     setGameOver(true);
     setLost(true);
-    showToast(`Le mot était : ${word}`);
-  }, [showToast]);
+    setLostWord(word);
+  }, []);
 
   /* ── Soumettre un essai ── */
   const submitGuess = useCallback(() => {
@@ -408,7 +478,13 @@ function App() {
           <main className="main">
             {toast && <Toast message={toast} />}
             <Board guesses={guesses} currentGuess={currentGuess} currentRow={currentRow} shake={shake} />
-            {lost && !winData && <p className="waiting-msg">⏳ En attente du prochain mot…</p>}
+            {lostWord && !winData && (
+              <div className="loss-banner">
+                <p className="loss-banner__label">Le mot était</p>
+                <p className="loss-banner__word">{lostWord}</p>
+                <p className="loss-banner__sub">⏳ En attente du prochain mot…</p>
+              </div>
+            )}
             <Keyboard onKey={handleKey} keyStates={keyStates} />
           </main>
         </div>

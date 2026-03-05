@@ -423,11 +423,36 @@ body {
   opacity: 0.85;
 }
 
-/* ── Waiting message (after lose) ── */
-.waiting-msg {
-  font-size: 0.85rem;
-  color: var(--color-text-muted);
+/* ── Loss banner (after lose) ── */
+.loss-banner {
+  background: rgba(58, 58, 60, 0.5);
+  border: 2px solid var(--color-border);
+  border-radius: 12px;
+  padding: 20px 36px;
   text-align: center;
+  animation: slideUp 0.3s ease;
+}
+
+.loss-banner__label {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12rem;
+  margin-bottom: 6px;
+}
+
+.loss-banner__word {
+  font-size: 2.2rem;
+  font-weight: 700;
+  letter-spacing: 0.35rem;
+  text-transform: uppercase;
+  color: #fff;
+  margin-bottom: 10px;
+}
+
+.loss-banner__sub {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
   animation: pulse 1.8s ease-in-out infinite;
 }
 
