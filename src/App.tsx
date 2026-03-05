@@ -21,12 +21,6 @@ interface WonPayload {
   new_game: Game;
 }
 
-interface GuessMadePayload {
-  player_name: string;
-  game_id: string;
-  tiles: string[]; // TileState[]
-}
-
 // ── Sauvegarde locale ──────────────────────────────────────────────────────
 interface SavedState {
   gameId: string;
@@ -73,8 +67,10 @@ function App() {
   const channelRef    = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const playerNameRef = useRef(playerName);
   const gameRef       = useRef<Game | null>(null);
+  const guessesRef    = useRef<TileData[][]>([]);
   useEffect(() => { playerNameRef.current = playerName; }, [playerName]);
   useEffect(() => { gameRef.current = game; }, [game]);
+  useEffect(() => { guessesRef.current = guesses; }, [guesses]);
 
   /* ── Toast ── */
   const showToast = useCallback((msg: string) => {
@@ -178,7 +174,7 @@ function App() {
     saveState({ gameId: game.id, guesses, currentRow, gameOver, lost });
   }, [game, guesses, currentRow, gameOver, lost]);
 
-  /* ── Broadcast channel (best-effort pour guess_made) ── */
+  /* ── Broadcast channel (best-effort pour game_won) ── */
   useEffect(() => {
     const channel = supabase.channel('game-events');
 
@@ -187,14 +183,6 @@ function App() {
         if (payload.winner_name === playerNameRef.current) return;
         fetchScores();
         startCountdown(payload.new_game, payload.winner_name, payload.winner_guesses, payload.word, false);
-      })
-      .on('broadcast', { event: 'guess_made' }, ({ payload }: { payload: GuessMadePayload }) => {
-        if (payload.player_name === playerNameRef.current) return;
-        if (payload.game_id !== gameRef.current?.id) return;
-        setPlayerProgress(prev => ({
-          ...prev,
-          [payload.player_name]: [...(prev[payload.player_name] || []), payload.tiles],
-        }));
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') channelRef.current = channel;
@@ -206,15 +194,20 @@ function App() {
     };
   }, [startCountdown, fetchScores]);
 
-  /* ── Présence DB : heartbeat toutes les 5s ── */
+  /* ── Présence DB : heartbeat toutes les 5s (avec progression) ── */
   useEffect(() => {
     if (!playerName) return;
 
-    const heartbeat = () =>
+    const heartbeat = () => {
+      const progressTiles = guessesRef.current.map(row => row.map(t => t.state));
       supabase
         .from('online_players')
-        .upsert({ name: playerName, last_seen: new Date().toISOString() }, { onConflict: 'name' })
+        .upsert(
+          { name: playerName, last_seen: new Date().toISOString(), progress: progressTiles },
+          { onConflict: 'name' },
+        )
         .then();
+    };
 
     heartbeat();                                    // signal immédiat
     const interval = setInterval(heartbeat, 5000);  // puis toutes les 5s
@@ -226,7 +219,7 @@ function App() {
     };
   }, [playerName]);
 
-  /* ── Présence DB : polling des joueurs en ligne ── */
+  /* ── Présence DB : polling des joueurs en ligne + progression ── */
   useEffect(() => {
     if (!playerName) return;
 
@@ -234,9 +227,19 @@ function App() {
       const cutoff = new Date(Date.now() - 15_000).toISOString();
       const { data } = await supabase
         .from('online_players')
-        .select('name')
+        .select('name, progress')
         .gte('last_seen', cutoff);
-      if (data) setConnectedPlayers(data.map(p => p.name));
+      if (data) {
+        setConnectedPlayers(data.map(p => p.name));
+        // Mettre à jour la progression des autres joueurs depuis la DB
+        const progressMap: Record<string, string[][]> = {};
+        for (const p of data) {
+          if (p.name !== playerName && Array.isArray(p.progress) && p.progress.length > 0) {
+            progressMap[p.name] = p.progress;
+          }
+        }
+        setPlayerProgress(progressMap);
+      }
     };
 
     poll();
@@ -349,16 +352,15 @@ function App() {
     setCurrentGuess('');
     setCurrentRow(r => r + 1);
 
-    // Broadcast notre progression (couleurs seulement, pas les lettres)
-    channelRef.current?.send({
-      type: 'broadcast',
-      event: 'guess_made',
-      payload: {
-        player_name: playerNameRef.current,
-        game_id: game.id,
-        tiles: result.map(t => t.state),
-      } satisfies GuessMadePayload,
-    });
+    // Sauvegarder la progression dans la DB (les autres joueurs la liront via polling)
+    const progressTiles = newGuesses.map(row => row.map(t => t.state));
+    supabase
+      .from('online_players')
+      .upsert(
+        { name: playerNameRef.current, last_seen: new Date().toISOString(), progress: progressTiles },
+        { onConflict: 'name' },
+      )
+      .then();
 
     const won = result.every(t => t.state === 'correct');
     if (won) handleWin(newGuesses.length);
