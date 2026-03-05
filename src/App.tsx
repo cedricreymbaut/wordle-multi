@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from './lib/supabase';
 import { getRandomWord, isValidWord } from './lib/words';
 import { evaluateGuess, buildKeyboardStates, WORD_LENGTH, MAX_GUESSES } from './lib/gameLogic';
+import * as sounds from './lib/sounds';
+import { vibrateKey, vibrateSubmit, vibrateError, vibrateWin } from './lib/haptics';
 import { Board } from './components/Board';
 import { Keyboard } from './components/Keyboard';
 import { WinNotification } from './components/WinNotification';
@@ -10,15 +12,24 @@ import { Header } from './components/Header';
 import { Toast } from './components/Toast';
 import { Sidebar } from './components/Sidebar';
 import type { Score } from './components/Sidebar';
-import type { TileData, Game } from './types';
+import type { TileData, Game, ChatMessage, GameHistoryEntry } from './types';
 
 const COUNTDOWN_SECONDS = 6;
+const HISTORY_KEY = 'wordle_history';
+const MAX_HISTORY = 20;
 
 interface WonPayload {
   winner_name: string;
   winner_guesses: number;
   word: string;
   new_game: Game;
+}
+
+interface ChatPayload {
+  id: string;
+  sender: string;
+  text: string;
+  timestamp: number;
 }
 
 // ── Sauvegarde locale ──────────────────────────────────────────────────────
@@ -42,6 +53,36 @@ function saveState(s: SavedState) {
   localStorage.setItem(SAVE_KEY, JSON.stringify(s));
 }
 
+// ── Historique local ───────────────────────────────────────────────────────
+function loadHistory(): GameHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+function saveHistory(entries: GameHistoryEntry[]) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY)));
+}
+
+// ── Streaks ────────────────────────────────────────────────────────────────
+function computeStreaks(
+  recentGames: { winner_name: string | null }[],
+): Record<string, number> {
+  const streaks: Record<string, number> = {};
+  if (recentGames.length === 0) return streaks;
+
+  let currentWinner = recentGames[0].winner_name;
+  if (!currentWinner) return streaks;
+
+  let count = 0;
+  for (const g of recentGames) {
+    if (g.winner_name === currentWinner) count++;
+    else break;
+  }
+  streaks[currentWinner] = count;
+  return streaks;
+}
+
 function App() {
   const [playerName, setPlayerName] = useState<string>(() =>
     localStorage.getItem('wordle_name') || ''
@@ -60,8 +101,12 @@ function App() {
   const [connectedPlayers, setConnectedPlayers] = useState<string[]>([]);
   const [scores, setScores]               = useState<Score[]>([]);
   const [sidebarOpen, setSidebarOpen]     = useState(false);
-  // progression des autres joueurs : { [pseudo]: [TileState[], ...] }
   const [playerProgress, setPlayerProgress] = useState<Record<string, string[][]>>({});
+  // ── New state ──
+  const [muted, setMuted]                 = useState(sounds.isMuted());
+  const [chatMessages, setChatMessages]   = useState<ChatMessage[]>([]);
+  const [unreadChat, setUnreadChat]       = useState(0);
+  const [gameHistory, setGameHistory]     = useState<GameHistoryEntry[]>(() => loadHistory());
 
   const countdownRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const toastRef      = useRef<ReturnType<typeof setTimeout>  | null>(null);
@@ -72,6 +117,34 @@ function App() {
   useEffect(() => { playerNameRef.current = playerName; }, [playerName]);
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => { guessesRef.current = guesses; }, [guesses]);
+
+  // ── Swipe gesture for sidebar (mobile) ──
+  useEffect(() => {
+    let startX = 0;
+    let startY = 0;
+
+    const onTouchStart = (e: TouchEvent) => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      const dx = e.changedTouches[0].clientX - startX;
+      const dy = e.changedTouches[0].clientY - startY;
+      // Only horizontal swipes (ignore vertical scrolling)
+      if (Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx)) return;
+
+      if (dx < -60) setSidebarOpen(true);   // swipe left → open
+      if (dx > 60)  setSidebarOpen(false);   // swipe right → close
+    };
+
+    document.addEventListener('touchstart', onTouchStart, { passive: true });
+    document.addEventListener('touchend', onTouchEnd, { passive: true });
+    return () => {
+      document.removeEventListener('touchstart', onTouchStart);
+      document.removeEventListener('touchend', onTouchEnd);
+    };
+  }, []);
 
   /* ── Toast ── */
   const showToast = useCallback((msg: string) => {
@@ -93,21 +166,56 @@ function App() {
     if (countdownRef.current) clearInterval(countdownRef.current);
   }, []);
 
-  /* ── Fetch scores ── */
+  /* ── Save to history ── */
+  const saveToHistory = useCallback((
+    gameId: string, word: string, winnerName: string | null,
+    myGuesses: TileData[][], won: boolean, didLose: boolean,
+  ) => {
+    setGameHistory(prev => {
+      // Don't duplicate
+      if (prev.some(e => e.gameId === gameId)) return prev;
+      const entry: GameHistoryEntry = {
+        gameId,
+        word,
+        winnerName,
+        myGuesses: myGuesses.map(row => row.map(t => t.state)),
+        won,
+        lost: didLose,
+        timestamp: new Date().toISOString(),
+      };
+      const updated = [entry, ...prev].slice(0, MAX_HISTORY);
+      saveHistory(updated);
+      return updated;
+    });
+  }, []);
+
+  /* ── Fetch scores + streaks ── */
   const fetchScores = useCallback(async () => {
+    // Fetch all wins for leaderboard
     const { data } = await supabase
       .from('games').select('winner_name')
       .eq('status', 'completed').not('winner_name', 'is', null);
     if (!data) return;
+
     const counts: Record<string, number> = {};
     for (const g of data) {
       if (g.winner_name) counts[g.winner_name] = (counts[g.winner_name] || 0) + 1;
     }
+
+    // Fetch recent games for streaks
+    const { data: recent } = await supabase
+      .from('games').select('winner_name')
+      .eq('status', 'completed').not('winner_name', 'is', null)
+      .order('ended_at', { ascending: false })
+      .limit(50);
+
+    const streaks = computeStreaks(recent ?? []);
+
     setScores(
       Object.entries(counts)
         .sort(([, a], [, b]) => b - a)
         .slice(0, 10)
-        .map(([name, wins]) => ({ name, wins }))
+        .map(([name, wins]) => ({ name, wins, streak: streaks[name] ?? 0 }))
     );
   }, []);
 
@@ -117,6 +225,15 @@ function App() {
   ) => {
     setWinData({ name: winnerName, guesses: winnerGuesses, word, isMe });
     setCountdown(COUNTDOWN_SECONDS);
+
+    // Save current game to history
+    if (gameRef.current) {
+      saveToHistory(
+        gameRef.current.id, gameRef.current.word, winnerName,
+        guessesRef.current, isMe, !isMe,
+      );
+    }
+
     let remaining = COUNTDOWN_SECONDS;
     if (countdownRef.current) clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
@@ -128,7 +245,7 @@ function App() {
         resetLocalGame();
       }
     }, 1000);
-  }, [resetLocalGame]);
+  }, [resetLocalGame, saveToHistory]);
 
   /* ── Chargement de la partie active ── */
   useEffect(() => {
@@ -176,15 +293,22 @@ function App() {
     saveState({ gameId: game.id, guesses, currentRow, gameOver, lost });
   }, [game, guesses, currentRow, gameOver, lost]);
 
-  /* ── Broadcast channel (best-effort pour game_won) ── */
+  /* ── Broadcast channel (game_won + chat) ── */
   useEffect(() => {
     const channel = supabase.channel('game-events');
 
     channel
       .on('broadcast', { event: 'game_won' }, ({ payload }: { payload: WonPayload }) => {
         if (payload.winner_name === playerNameRef.current) return;
+        sounds.playOtherWin();
         fetchScores();
         startCountdown(payload.new_game, payload.winner_name, payload.winner_guesses, payload.word, false);
+      })
+      .on('broadcast', { event: 'chat_message' }, ({ payload }: { payload: ChatPayload }) => {
+        if (payload.sender === playerNameRef.current) return;
+        sounds.playChatNotif();
+        setChatMessages(prev => [...prev, payload]);
+        setUnreadChat(prev => prev + 1);
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') channelRef.current = channel;
@@ -195,6 +319,22 @@ function App() {
       channelRef.current = null;
     };
   }, [startCountdown, fetchScores]);
+
+  /* ── Send chat message ── */
+  const sendChatMessage = useCallback((text: string) => {
+    if (!channelRef.current || !playerNameRef.current) return;
+    const msg: ChatPayload = {
+      id: crypto.randomUUID(),
+      sender: playerNameRef.current,
+      text,
+      timestamp: Date.now(),
+    };
+    // Add locally immediately
+    setChatMessages(prev => [...prev, msg]);
+    // Broadcast to others
+    channelRef.current.send({ type: 'broadcast', event: 'chat_message', payload: msg })
+      .catch((err: unknown) => console.warn('[chat] broadcast failed:', err));
+  }, []);
 
   /* ── Présence DB : heartbeat toutes les 5s (avec progression) ── */
   useEffect(() => {
@@ -211,12 +351,11 @@ function App() {
         .then();
     };
 
-    heartbeat();                                    // signal immédiat
-    const interval = setInterval(heartbeat, 5000);  // puis toutes les 5s
+    heartbeat();
+    const interval = setInterval(heartbeat, 5000);
 
     return () => {
       clearInterval(interval);
-      // best-effort : supprimer la ligne quand le composant se démonte
       supabase.from('online_players').delete().eq('name', playerName).then();
     };
   }, [playerName]);
@@ -233,7 +372,6 @@ function App() {
         .gte('last_seen', cutoff);
       if (data) {
         setConnectedPlayers(data.map(p => p.name));
-        // Mettre à jour la progression des autres joueurs depuis la DB
         const progressMap: Record<string, string[][]> = {};
         for (const p of data) {
           if (p.name !== playerName && Array.isArray(p.progress) && p.progress.length > 0) {
@@ -249,11 +387,9 @@ function App() {
     return () => clearInterval(interval);
   }, [playerName]);
 
-  /* ── Polling : détecter si la partie a été gagnée par quelqu'un ──
-       IMPORTANT : ne PAS exclure gameOver ici,
-       sinon un joueur qui a perdu ne sera jamais averti. */
+  /* ── Polling : détecter si la partie a été gagnée par quelqu'un ── */
   useEffect(() => {
-    if (!game || winData) return;               // ← gameOver retiré
+    if (!game || winData) return;
     const interval = setInterval(async () => {
       try {
         const { data } = await supabase
@@ -262,7 +398,6 @@ function App() {
           .eq('id', game.id)
           .single();
         if (data && data.status === 'completed' && data.winner_name) {
-          // La partie a été gagnée — charger la nouvelle partie
           const { data: newGame } = await supabase
             .from('games')
             .select('*')
@@ -271,7 +406,8 @@ function App() {
             .limit(1)
             .single();
           if (newGame && data.winner_name !== playerNameRef.current) {
-            clearInterval(interval);  // Stopper le polling dès la détection
+            clearInterval(interval);
+            sounds.playOtherWin();
             fetchScores();
             startCountdown(
               newGame,
@@ -304,7 +440,6 @@ function App() {
           .gte('last_seen', cutoff);
         if (!data) return;
 
-        // Un joueur est "encore en jeu" s'il a entre 1 et MAX_GUESSES-1 essais
         const someoneStillPlaying = data.some(p => {
           if (p.name === playerName) return false;
           const prog = Array.isArray(p.progress) ? p.progress : [];
@@ -314,14 +449,15 @@ function App() {
         if (!someoneStillPlaying) {
           if (interval) clearInterval(interval);
 
-          // Compléter la partie sans vainqueur
+          // Save to history (no winner)
+          saveToHistory(game.id, game.word, null, guessesRef.current, false, true);
+
           await supabase
             .from('games')
             .update({ status: 'completed', ended_at: new Date().toISOString() })
             .eq('id', game.id)
             .eq('status', 'active');
 
-          // Créer une nouvelle partie (l'index unique empêche les doublons)
           const newWord = getRandomWord();
           const { data: newGame, error: insertError } = await supabase
             .from('games')
@@ -345,7 +481,6 @@ function App() {
       }
     };
 
-    // Attendre 5s après la défaite, puis vérifier toutes les 4s
     const timeout = setTimeout(() => {
       checkAllLost();
       interval = setInterval(checkAllLost, 4000);
@@ -355,12 +490,14 @@ function App() {
       clearTimeout(timeout);
       if (interval) clearInterval(interval);
     };
-  }, [lost, winData, game, playerName, startCountdown]);
+  }, [lost, winData, game, playerName, startCountdown, saveToHistory]);
 
   /* ── Victoire ── */
   const handleWin = useCallback(async (guessCount: number) => {
     if (!game || !playerNameRef.current) return;
     setGameOver(true);
+    sounds.playWin();
+    vibrateWin();
     const newWord = getRandomWord();
     try {
       const { data, error } = await supabase.rpc('complete_game', {
@@ -376,7 +513,6 @@ function App() {
         return;
       }
       if (!data?.success) {
-        // Quelqu'un d'autre a gagné juste avant nous (race condition)
         console.warn('[handleWin] Game already completed');
         return;
       }
@@ -386,7 +522,6 @@ function App() {
         word: game.word,
         new_game: data.new_game,
       };
-      // Envoyer le broadcast (best-effort, le polling prend le relais si ça échoue)
       channelRef.current?.send({ type: 'broadcast', event: 'game_won', payload })
         .catch((err: unknown) => console.warn('[handleWin] broadcast failed:', err));
       fetchScores();
@@ -403,6 +538,7 @@ function App() {
     setGameOver(true);
     setLost(true);
     setLostWord(word);
+    sounds.playLose();
   }, []);
 
   /* ── Soumettre un essai ── */
@@ -411,18 +547,24 @@ function App() {
 
     if (!isValidWord(currentGuess)) {
       showToast('Mot non reconnu');
+      sounds.playInvalidWord();
+      vibrateError();
       setShake(true);
       setTimeout(() => setShake(false), 500);
       return;
     }
 
+    vibrateSubmit();
     const result = evaluateGuess(currentGuess, game.word);
     const newGuesses = [...guesses, result];
     setGuesses(newGuesses);
     setCurrentGuess('');
     setCurrentRow(r => r + 1);
 
-    // Sauvegarder la progression dans la DB (les autres joueurs la liront via polling)
+    // Play tile flip sounds
+    sounds.playTileRow(WORD_LENGTH);
+
+    // Sauvegarder la progression dans la DB
     const progressTiles = newGuesses.map(row => row.map(t => t.state));
     supabase
       .from('online_players')
@@ -440,10 +582,17 @@ function App() {
   /* ── Clavier ── */
   const handleKey = useCallback((key: string) => {
     if (gameOver || winData) return;
-    if (key === '⌫' || key === 'Backspace') setCurrentGuess(g => g.slice(0, -1));
-    else if (key === 'ENTER' || key === 'Enter') submitGuess();
-    else if (/^[A-Za-z]$/.test(key) && currentGuess.length < WORD_LENGTH)
+    if (key === '⌫' || key === 'Backspace') {
+      sounds.playBackspace();
+      vibrateKey();
+      setCurrentGuess(g => g.slice(0, -1));
+    } else if (key === 'ENTER' || key === 'Enter') {
+      submitGuess();
+    } else if (/^[A-Za-z]$/.test(key) && currentGuess.length < WORD_LENGTH) {
+      sounds.playKeyClick();
+      vibrateKey();
       setCurrentGuess(g => g + key.toUpperCase());
+    }
   }, [gameOver, winData, currentGuess, submitGuess]);
 
   useEffect(() => {
@@ -451,6 +600,12 @@ function App() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [handleKey]);
+
+  /* ── Mute toggle ── */
+  const handleToggleMute = useCallback(() => {
+    const newMuted = sounds.toggleMuted();
+    setMuted(newMuted);
+  }, []);
 
   if (!playerName) {
     return (
@@ -462,7 +617,6 @@ function App() {
   }
 
   const keyStates = buildKeyboardStates(guesses);
-  // Progression du joueur courant sous forme de TileState[][]
   const myProgress = guesses.map(row => row.map(t => t.state));
 
   return (
@@ -472,6 +626,8 @@ function App() {
         onlineCount={connectedPlayers.length}
         onToggleSidebar={() => setSidebarOpen(o => !o)}
         sidebarOpen={sidebarOpen}
+        muted={muted}
+        onToggleMute={handleToggleMute}
       />
       <div className="layout">
         <div className="game-area">
@@ -496,6 +652,11 @@ function App() {
           playerProgress={playerProgress}
           isOpen={sidebarOpen}
           onToggle={() => setSidebarOpen(o => !o)}
+          chatMessages={chatMessages}
+          onSendChat={sendChatMessage}
+          unreadChat={unreadChat}
+          onChatSeen={() => setUnreadChat(0)}
+          gameHistory={gameHistory}
         />
       </div>
       {winData && (

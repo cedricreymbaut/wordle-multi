@@ -20,3 +20,20 @@ export interface CompleteGameResult {
   message?: string;
   new_game?: Game;
 }
+
+export interface ChatMessage {
+  id: string;
+  sender: string;
+  text: string;
+  timestamp: number;
+}
+
+export interface GameHistoryEntry {
+  gameId: string;
+  word: string;
+  winnerName: string | null;
+  myGuesses: string[][];
+  won: boolean;
+  lost: boolean;
+  timestamp: string;
+}
