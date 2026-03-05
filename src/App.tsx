@@ -596,7 +596,12 @@ function App() {
   }, [gameOver, winData, currentGuess, submitGuess]);
 
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => handleKey(e.key);
+    const handler = (e: KeyboardEvent) => {
+      // Ne pas capturer les touches quand on tape dans un input (ex: chat)
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      handleKey(e.key);
+    };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [handleKey]);
