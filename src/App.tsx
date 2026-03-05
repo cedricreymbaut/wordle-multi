@@ -322,17 +322,18 @@ function App() {
 
   /* ── Send chat message ── */
   const sendChatMessage = useCallback((text: string) => {
-    if (!channelRef.current || !playerNameRef.current) return;
+    const name = playerNameRef.current;
+    if (!name) return;
     const msg: ChatPayload = {
       id: crypto.randomUUID(),
-      sender: playerNameRef.current,
+      sender: name,
       text,
       timestamp: Date.now(),
     };
-    // Add locally immediately
+    // Toujours ajouter localement
     setChatMessages(prev => [...prev, msg]);
-    // Broadcast to others
-    channelRef.current.send({ type: 'broadcast', event: 'chat_message', payload: msg })
+    // Broadcast aux autres (best-effort)
+    channelRef.current?.send({ type: 'broadcast', event: 'chat_message', payload: msg })
       .catch((err: unknown) => console.warn('[chat] broadcast failed:', err));
   }, []);
 
