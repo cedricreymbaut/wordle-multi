@@ -256,62 +256,86 @@ function App() {
     }
   }, [playerName]);
 
-  /* ── Polling de secours : détecter si la partie a été gagnée ── */
+  /* ── Polling : détecter si la partie a été gagnée par quelqu'un ──
+       IMPORTANT : ne PAS exclure gameOver ici,
+       sinon un joueur qui a perdu ne sera jamais averti. */
   useEffect(() => {
-    if (!game || gameOver || winData) return;
+    if (!game || winData) return;               // ← gameOver retiré
     const interval = setInterval(async () => {
-      const { data } = await supabase
-        .from('games')
-        .select('status, winner_name, winner_guesses')
-        .eq('id', game.id)
-        .single();
-      if (data && data.status === 'completed' && data.winner_name) {
-        // Quelqu'un a gagné — charger la nouvelle partie
-        const { data: newGame } = await supabase
+      try {
+        const { data } = await supabase
           .from('games')
-          .select('*')
-          .eq('status', 'active')
-          .order('started_at', { ascending: false })
-          .limit(1)
+          .select('status, winner_name, winner_guesses')
+          .eq('id', game.id)
           .single();
-        if (newGame && data.winner_name !== playerNameRef.current) {
-          fetchScores();
-          startCountdown(
-            newGame,
-            data.winner_name,
-            data.winner_guesses ?? 0,
-            game.word,
-            false,
-          );
+        if (data && data.status === 'completed' && data.winner_name) {
+          // La partie a été gagnée — charger la nouvelle partie
+          const { data: newGame } = await supabase
+            .from('games')
+            .select('*')
+            .eq('status', 'active')
+            .order('started_at', { ascending: false })
+            .limit(1)
+            .single();
+          if (newGame && data.winner_name !== playerNameRef.current) {
+            clearInterval(interval);  // Stopper le polling dès la détection
+            fetchScores();
+            startCountdown(
+              newGame,
+              data.winner_name,
+              data.winner_guesses ?? 0,
+              game.word,
+              false,
+            );
+          }
         }
+      } catch {
+        // Erreur réseau — on réessaie au prochain cycle
       }
-    }, 3000);
+    }, 2500);
     return () => clearInterval(interval);
-  }, [game, gameOver, winData, fetchScores, startCountdown]);
+  }, [game, winData, fetchScores, startCountdown]);
 
   /* ── Victoire ── */
   const handleWin = useCallback(async (guessCount: number) => {
     if (!game || !playerNameRef.current) return;
     setGameOver(true);
     const newWord = getRandomWord();
-    const { data } = await supabase.rpc('complete_game', {
-      p_game_id: game.id,
-      p_winner_name: playerNameRef.current,
-      p_winner_guesses: guessCount,
-      p_new_word: newWord,
-    });
-    if (data?.success) {
+    try {
+      const { data, error } = await supabase.rpc('complete_game', {
+        p_game_id: game.id,
+        p_winner_name: playerNameRef.current,
+        p_winner_guesses: guessCount,
+        p_new_word: newWord,
+      });
+      if (error) {
+        console.error('[handleWin] RPC error:', error);
+        showToast('Erreur réseau — réessaie !');
+        setGameOver(false);
+        return;
+      }
+      if (!data?.success) {
+        // Quelqu'un d'autre a gagné juste avant nous (race condition)
+        console.warn('[handleWin] Game already completed');
+        return;
+      }
       const payload: WonPayload = {
         winner_name: playerNameRef.current,
         winner_guesses: guessCount,
         word: game.word,
         new_game: data.new_game,
       };
-      await channelRef.current?.send({ type: 'broadcast', event: 'game_won', payload });
+      // Envoyer le broadcast (best-effort, le polling prend le relais si ça échoue)
+      channelRef.current?.send({ type: 'broadcast', event: 'game_won', payload })
+        .catch((err: unknown) => console.warn('[handleWin] broadcast failed:', err));
       fetchScores();
       startCountdown(data.new_game, playerNameRef.current, guessCount, game.word, true);
+    } catch (err) {
+      console.error('[handleWin] unexpected error:', err);
+      showToast('Erreur — réessaie !');
+      setGameOver(false);
     }
-  }, [game, startCountdown, fetchScores]);
+  }, [game, startCountdown, fetchScores, showToast]);
 
   /* ── Défaite ── */
   const handleLose = useCallback((word: string) => {
