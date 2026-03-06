@@ -322,19 +322,31 @@ function App() {
 
   /* ── Send chat message ── */
   const sendChatMessage = useCallback((text: string) => {
-    const name = playerNameRef.current;
-    if (!name) return;
-    const msg: ChatPayload = {
-      id: crypto.randomUUID(),
-      sender: name,
-      text,
-      timestamp: Date.now(),
-    };
-    // Toujours ajouter localement
-    setChatMessages(prev => [...prev, msg]);
-    // Broadcast aux autres (best-effort)
-    channelRef.current?.send({ type: 'broadcast', event: 'chat_message', payload: msg })
-      .catch((err: unknown) => console.warn('[chat] broadcast failed:', err));
+    try {
+      const name = playerNameRef.current;
+      console.log('[sendChatMessage] called, name:', name, 'text:', text);
+      if (!name) {
+        console.warn('[sendChatMessage] no player name, aborting');
+        return;
+      }
+      let id: string;
+      try {
+        id = crypto.randomUUID();
+      } catch {
+        id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      }
+      const msg: ChatPayload = { id, sender: name, text, timestamp: Date.now() };
+      setChatMessages(prev => {
+        const next = [...prev, msg];
+        console.log('[sendChatMessage] messages count:', next.length);
+        return next;
+      });
+      // Broadcast aux autres (best-effort)
+      channelRef.current?.send({ type: 'broadcast', event: 'chat_message', payload: msg })
+        .catch((err: unknown) => console.warn('[chat] broadcast failed:', err));
+    } catch (err) {
+      console.error('[sendChatMessage] unexpected error:', err);
+    }
   }, []);
 
   /* ── Présence DB : heartbeat toutes les 5s (avec progression) ── */

@@ -68,6 +68,7 @@ export function Sidebar({
   const [activeTab, setActiveTab] = useState<TabId>('players');
 
   const handleTabClick = (tab: TabId) => {
+    console.log('[Sidebar] tab clicked:', tab);
     setActiveTab(tab);
     if (tab === 'chat') onChatSeen();
   };
