@@ -324,11 +324,7 @@ function App() {
   const sendChatMessage = useCallback((text: string) => {
     try {
       const name = playerNameRef.current;
-      console.log('[sendChatMessage] called, name:', name, 'text:', text);
-      if (!name) {
-        console.warn('[sendChatMessage] no player name, aborting');
-        return;
-      }
+      if (!name) return;
       let id: string;
       try {
         id = crypto.randomUUID();
@@ -336,16 +332,11 @@ function App() {
         id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       }
       const msg: ChatPayload = { id, sender: name, text, timestamp: Date.now() };
-      setChatMessages(prev => {
-        const next = [...prev, msg];
-        console.log('[sendChatMessage] messages count:', next.length);
-        return next;
-      });
-      // Broadcast aux autres (best-effort)
+      setChatMessages(prev => [...prev, msg]);
       channelRef.current?.send({ type: 'broadcast', event: 'chat_message', payload: msg })
-        .catch((err: unknown) => console.warn('[chat] broadcast failed:', err));
-    } catch (err) {
-      console.error('[sendChatMessage] unexpected error:', err);
+        .catch(() => {});
+    } catch {
+      // silently ignore
     }
   }, []);
 

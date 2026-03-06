@@ -21,34 +21,26 @@ export function Chat({ messages, onSend, currentPlayer }: ChatProps) {
   const doSend = () => {
     const trimmed = input.trim();
     if (trimmed.length === 0 || trimmed.length > 200) return;
-    console.log('[Chat] doSend called with:', trimmed);
     try {
       onSend(trimmed);
       setInput('');
-    } catch (err) {
-      console.error('[Chat] onSend threw:', err);
+    } catch {
+      // silently ignore
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[Chat] form submit');
     doSend();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Empêcher le jeu de capturer les touches dans l'input chat
     e.stopPropagation();
-    // Sur mobile, certains navigateurs ne déclenchent pas le submit du form
-    // → on gère Enter explicitement aussi
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      console.log('[Chat] Enter key pressed');
       doSend();
     }
   };
-
-  console.log('[Chat] render, messages:', messages.length, 'currentPlayer:', currentPlayer);
 
   return (
     <div className="chat">
@@ -81,7 +73,7 @@ export function Chat({ messages, onSend, currentPlayer }: ChatProps) {
         <button
           className="chat__send"
           type="button"
-          onClick={() => { console.log('[Chat] send button clicked'); doSend(); }}
+          onClick={doSend}
         >
           ➤
         </button>
