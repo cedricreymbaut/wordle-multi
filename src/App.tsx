@@ -607,7 +607,7 @@ function App() {
   const submitGuess = useCallback(() => {
     if (!game || gameOver || currentGuess.length !== WORD_LENGTH || winData) return;
 
-    if (!isValidWord(currentGuess)) {
+    if (!isValidWord(currentGuess) && currentGuess !== game.word) {
       showToast('Mot non reconnu');
       sounds.playInvalidWord();
       vibrateError();
