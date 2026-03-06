@@ -307,7 +307,28 @@ function App() {
     };
   }, [startCountdown, fetchScores]);
 
-  /* ── Chat : Realtime Postgres Changes sur chat_messages ── */
+  /* ── Chat : chargement + Realtime + polling fallback ── */
+  const lastChatTsRef = useRef<string>(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+
+  const addRemoteMessages = useCallback((rows: { id: string; sender: string; text: string; created_at: string }[]) => {
+    if (rows.length === 0) return;
+    // Mettre à jour le curseur pour le polling
+    const maxTs = rows.reduce((max, r) => r.created_at > max ? r.created_at : max, lastChatTsRef.current);
+    lastChatTsRef.current = maxTs;
+
+    setChatMessages(prev => {
+      const existingIds = new Set(prev.map(m => m.id));
+      const newMsgs = rows
+        .filter(m => !existingIds.has(m.id) && m.sender !== playerNameRef.current)
+        .map(m => ({ id: m.id, sender: m.sender, text: m.text, timestamp: new Date(m.created_at).getTime() }));
+      if (newMsgs.length === 0) return prev;
+      // Jouer le son de notif pour les nouveaux messages
+      sounds.playChatNotif();
+      setUnreadChat(u => u + newMsgs.length);
+      return [...prev, ...newMsgs];
+    });
+  }, []);
+
   useEffect(() => {
     // Charger les messages récents (dernières 24h)
     const loadRecent = async () => {
@@ -318,18 +339,17 @@ function App() {
         .gte('created_at', since)
         .order('created_at', { ascending: true })
         .limit(100);
-      if (data) {
+      if (data && data.length > 0) {
+        lastChatTsRef.current = data[data.length - 1].created_at;
         setChatMessages(data.map(m => ({
-          id: m.id,
-          sender: m.sender,
-          text: m.text,
+          id: m.id, sender: m.sender, text: m.text,
           timestamp: new Date(m.created_at).getTime(),
         })));
       }
     };
     loadRecent();
 
-    // Écouter les INSERT en temps réel
+    // Realtime : écouter les INSERT (instantané quand ça marche)
     const channel = supabase
       .channel('chat-realtime')
       .on(
@@ -337,33 +357,34 @@ function App() {
         { event: 'INSERT', schema: 'public', table: 'chat_messages' },
         (payload) => {
           const m = payload.new as { id: string; sender: string; text: string; created_at: string };
-          // Ignorer nos propres messages (déjà ajoutés localement)
-          if (m.sender === playerNameRef.current) return;
-          sounds.playChatNotif();
-          setChatMessages(prev => {
-            // Éviter les doublons
-            if (prev.some(msg => msg.id === m.id)) return prev;
-            return [...prev, {
-              id: m.id,
-              sender: m.sender,
-              text: m.text,
-              timestamp: new Date(m.created_at).getTime(),
-            }];
-          });
-          setUnreadChat(prev => prev + 1);
+          addRemoteMessages([m]);
         },
       )
       .subscribe();
 
-    // Nettoyage des vieux messages (> 24h) — une seule fois au chargement
+    // Polling fallback : vérifier les nouveaux messages toutes les 4s
+    const pollInterval = setInterval(async () => {
+      const { data } = await supabase
+        .from('chat_messages')
+        .select('id, sender, text, created_at')
+        .gt('created_at', lastChatTsRef.current)
+        .order('created_at', { ascending: true })
+        .limit(50);
+      if (data) addRemoteMessages(data);
+    }, 4000);
+
+    // Nettoyage des vieux messages (> 24h)
     supabase
       .from('chat_messages')
       .delete()
       .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
       .then();
 
-    return () => { supabase.removeChannel(channel); };
-  }, []);
+    return () => {
+      supabase.removeChannel(channel);
+      clearInterval(pollInterval);
+    };
+  }, [addRemoteMessages]);
 
   /* ── Send chat message ── */
   const sendChatMessage = useCallback((text: string) => {
