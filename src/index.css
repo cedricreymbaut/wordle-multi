@@ -911,14 +911,114 @@ body {
   line-height: 1;
 }
 
-/* Mobile : sidebar en overlay depuis la droite */
+/* ── Mobile (≤ 720px) ── */
 @media (max-width: 720px) {
+  :root {
+    --tile-size: min(48px, calc((100vw - 48px) / 5));
+    --tile-gap: 4px;
+  }
+
+  /* Header compact */
+  .header {
+    padding: 8px 12px;
+  }
+
+  .header__title {
+    font-size: 1.3rem;
+    letter-spacing: 0.12rem;
+  }
+
+  .header__badge {
+    font-size: 0.5rem;
+    padding: 2px 5px;
+  }
+
+  .header__meta {
+    gap: 8px;
+  }
+
+  .header__player {
+    font-size: 0.7rem;
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header__mute-btn {
+    font-size: 0.85rem;
+    padding: 4px 6px;
+  }
+
+  .header__sidebar-btn {
+    display: flex;
+    align-items: center;
+    font-size: 0.95rem;
+    padding: 5px 8px;
+  }
+
+  /* Layout plein écran */
+  .layout {
+    padding: 0;
+  }
+
+  .game-area {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .main {
+    padding: 8px 0 10px;
+    gap: 8px;
+  }
+
+  /* Keyboard compact */
+  .keyboard {
+    gap: 5px;
+    padding: 0 4px;
+    max-width: 100%;
+  }
+
+  .keyboard-row {
+    gap: 4px;
+  }
+
+  .key {
+    height: 46px;
+    min-width: 30px;
+    max-width: 38px;
+    font-size: 0.8rem;
+    border-radius: 5px;
+  }
+
+  .key--wide {
+    min-width: 50px;
+    max-width: 56px;
+    font-size: 0.65rem;
+  }
+
+  /* Tile font size */
+  .tile {
+    font-size: 1.6rem;
+  }
+
+  /* Loss banner compact */
+  .loss-banner {
+    padding: 12px 20px;
+  }
+
+  .loss-banner__word {
+    font-size: 1.6rem;
+  }
+
+  /* Sidebar overlay */
   .sidebar {
     position: fixed;
     top: 0;
     right: -300px;
-    width: 300px;
+    width: min(300px, 85vw);
     height: 100%;
+    height: 100dvh;
     background: var(--color-bg);
     border-left: 1px solid var(--color-border);
     padding: 16px 12px 24px;
@@ -935,36 +1035,89 @@ body {
 
   .sidebar-backdrop {
     display: block;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.28s ease;
-  }
-
-  .sidebar--open ~ .sidebar-backdrop,
-  .sidebar-backdrop:has(~ .sidebar--open) {
     opacity: 1;
     pointer-events: auto;
   }
 
+  /* Chat messages adapt to viewport */
   .chat__messages {
-    max-height: calc(100vh - 200px);
+    max-height: calc(100dvh - 180px);
+  }
+
+  /* Notification compact */
+  .notification {
+    padding: 24px 28px;
+  }
+
+  .notification__title {
+    font-size: 1.4rem;
   }
 }
 
-/* ── Responsive ── */
-@media (max-height: 680px) {
-  :root { --tile-size: 52px; }
-  .key { height: 50px; }
-}
-
+/* ── Very small screens (≤ 360px) ── */
 @media (max-width: 360px) {
-  :root { --tile-size: 54px; }
-  .key { min-width: 36px; max-width: 36px; }
-  .key--wide { min-width: 56px; max-width: 56px; }
+  :root { --tile-size: 48px; }
+
+  .header__title {
+    font-size: 1.1rem;
+  }
+
+  .header__player {
+    display: none;
+  }
+
+  .key {
+    min-width: 26px;
+    max-width: 34px;
+    height: 42px;
+    font-size: 0.75rem;
+  }
+
+  .key--wide {
+    min-width: 44px;
+    max-width: 50px;
+  }
+
+  .tile {
+    font-size: 1.4rem;
+  }
 }
 
-/* Sur desktop, la game-area n'a plus besoin de max-width puisque
-   le layout parent gère la largeur */
+/* ── Short screens ── */
+@media (max-height: 680px) {
+  :root { --tile-size: 48px; }
+
+  .main {
+    gap: 6px;
+    padding: 6px 0 8px;
+  }
+
+  .key {
+    height: 42px;
+  }
+}
+
+/* ── Very short screens (paysage mobile) ── */
+@media (max-height: 560px) {
+  :root { --tile-size: 38px; }
+
+  .header { padding: 4px 12px; }
+
+  .main {
+    gap: 4px;
+    padding: 4px 0 6px;
+  }
+
+  .key {
+    height: 36px;
+  }
+
+  .tile {
+    font-size: 1.2rem;
+  }
+}
+
+/* ── Desktop ── */
 @media (min-width: 721px) {
   .game-area { align-items: center; }
   .main { width: 100%; }
