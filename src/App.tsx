@@ -25,13 +25,6 @@ interface WonPayload {
   new_game: Game;
 }
 
-interface ChatPayload {
-  id: string;
-  sender: string;
-  text: string;
-  timestamp: number;
-}
-
 // ── Sauvegarde locale ──────────────────────────────────────────────────────
 interface SavedState {
   gameId: string;
@@ -293,7 +286,7 @@ function App() {
     saveState({ gameId: game.id, guesses, currentRow, gameOver, lost });
   }, [game, guesses, currentRow, gameOver, lost]);
 
-  /* ── Broadcast channel (game_won + chat) ── */
+  /* ── Broadcast channel (game_won only) ── */
   useEffect(() => {
     const channel = supabase.channel('game-events');
 
@@ -303,12 +296,6 @@ function App() {
         sounds.playOtherWin();
         fetchScores();
         startCountdown(payload.new_game, payload.winner_name, payload.winner_guesses, payload.word, false);
-      })
-      .on('broadcast', { event: 'chat_message' }, ({ payload }: { payload: ChatPayload }) => {
-        if (payload.sender === playerNameRef.current) return;
-        sounds.playChatNotif();
-        setChatMessages(prev => [...prev, payload]);
-        setUnreadChat(prev => prev + 1);
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') channelRef.current = channel;
@@ -320,24 +307,74 @@ function App() {
     };
   }, [startCountdown, fetchScores]);
 
+  /* ── Chat : Realtime Postgres Changes sur chat_messages ── */
+  useEffect(() => {
+    // Charger les messages récents (dernières 24h)
+    const loadRecent = async () => {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { data } = await supabase
+        .from('chat_messages')
+        .select('id, sender, text, created_at')
+        .gte('created_at', since)
+        .order('created_at', { ascending: true })
+        .limit(100);
+      if (data) {
+        setChatMessages(data.map(m => ({
+          id: m.id,
+          sender: m.sender,
+          text: m.text,
+          timestamp: new Date(m.created_at).getTime(),
+        })));
+      }
+    };
+    loadRecent();
+
+    // Écouter les INSERT en temps réel
+    const channel = supabase
+      .channel('chat-realtime')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'chat_messages' },
+        (payload) => {
+          const m = payload.new as { id: string; sender: string; text: string; created_at: string };
+          // Ignorer nos propres messages (déjà ajoutés localement)
+          if (m.sender === playerNameRef.current) return;
+          sounds.playChatNotif();
+          setChatMessages(prev => {
+            // Éviter les doublons
+            if (prev.some(msg => msg.id === m.id)) return prev;
+            return [...prev, {
+              id: m.id,
+              sender: m.sender,
+              text: m.text,
+              timestamp: new Date(m.created_at).getTime(),
+            }];
+          });
+          setUnreadChat(prev => prev + 1);
+        },
+      )
+      .subscribe();
+
+    // Nettoyage des vieux messages (> 24h) — une seule fois au chargement
+    supabase
+      .from('chat_messages')
+      .delete()
+      .lt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      .then();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
   /* ── Send chat message ── */
   const sendChatMessage = useCallback((text: string) => {
-    try {
-      const name = playerNameRef.current;
-      if (!name) return;
-      let id: string;
-      try {
-        id = crypto.randomUUID();
-      } catch {
-        id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-      }
-      const msg: ChatPayload = { id, sender: name, text, timestamp: Date.now() };
-      setChatMessages(prev => [...prev, msg]);
-      channelRef.current?.send({ type: 'broadcast', event: 'chat_message', payload: msg })
-        .catch(() => {});
-    } catch {
-      // silently ignore
-    }
+    const name = playerNameRef.current;
+    if (!name) return;
+    const id = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const msg: ChatMessage = { id, sender: name, text, timestamp: Date.now() };
+    // Ajouter localement immédiatement
+    setChatMessages(prev => [...prev, msg]);
+    // Persister en DB (le Realtime notifiera les autres joueurs)
+    supabase.from('chat_messages').insert({ sender: name, text }).then();
   }, []);
 
   /* ── Présence DB : heartbeat toutes les 5s (avec progression) ── */
